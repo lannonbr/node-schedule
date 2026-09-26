@@ -1,0 +1,30 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nodeschedule-controller
+  namespace: automation
+rules:
+  - apiGroups: [automation.lannonbr.com]
+    resources: [nodeschedules]
+    verbs: [get, list, watch]
+  - apiGroups: [automation.lannonbr.com]
+    resources: [nodeschedules/status]
+    verbs: [get, update, patch]
+  - apiGroups: [automation.lannonbr.com]
+    resources: [nodeschedules/finalizers]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [configmaps, secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch, update]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]

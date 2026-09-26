@@ -1,0 +1,15 @@
+{
+  "name": "@lannonbr/node-schedule",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deploy script folders as NodeSchedule resources",
+  "bin": {
+    "nodeschedule": "cli/nodeschedule.js"
+  },
+  "scripts": {
+    "test": "node --test cli/nodeschedule.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
