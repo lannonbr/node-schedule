@@ -26,10 +26,11 @@ function parseArgs(args) {
   return options;
 }
 
-function kubectlApply(resource, namespace, context) {
+function kubectlApply(resource, namespace, context, outputJSON = false) {
   return new Promise((resolve, reject) => {
     const args = ["apply", "--server-side", "--field-manager=nodeschedule-cli", "-n", namespace];
     if (context) args.push("--context", context);
+    if (outputJSON) args.push("-o", "json");
     args.push("-f", "-");
     const child = spawn("kubectl", args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -56,8 +57,17 @@ async function deploy(options) {
   const envFile = await readFile(path.join(folder, ".env"), "utf8");
   const { source, schedule, timeZone } = parseScript(script);
   const env = parseEnv(envFile);
-  const resources = buildResources({ name, namespace: options.namespace, source, schedule, timeZone, env });
-  for (const resource of resources) {
+  const [nodeSchedule, ...dependents] = buildResources({ name, namespace: options.namespace, source, schedule, timeZone, env });
+  const applied = await kubectlApply(nodeSchedule, options.namespace, options.context, true);
+  let uid;
+  try { uid = JSON.parse(applied).metadata.uid; }
+  catch { throw new Error(`kubectl did not return a valid NodeSchedule ${options.namespace}/${name}`); }
+  if (typeof uid !== "string" || !uid) throw new Error(`kubectl did not return a UID for NodeSchedule ${options.namespace}/${name}`);
+
+  for (const resource of dependents) {
+    resource.metadata.ownerReferences = [{
+      apiVersion: nodeSchedule.apiVersion, kind: nodeSchedule.kind, name, uid,
+    }];
     const result = await kubectlApply(resource, options.namespace, options.context);
     console.log(result);
   }

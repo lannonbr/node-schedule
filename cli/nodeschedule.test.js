@@ -13,7 +13,7 @@ test("preserves a runnable ES module and references all env values through a Sec
   assert.equal(parsed.schedule, "0 7 * * *");
   assert.equal(parsed.timeZone, "America/New_York");
   assert.equal(parsed.source, script);
-  const [secret, configMap, resource] = buildResources({ name: "daily", namespace: "automation", ...parsed, env });
+  const [resource, secret, configMap] = buildResources({ name: "daily", namespace: "automation", ...parsed, env });
   assert.equal(secret.data.TOKEN, Buffer.from("a secret").toString("base64"));
   assert.equal(configMap.data["script.js"], parsed.source);
   assert.equal(resource.spec.env.length, 2);
@@ -26,9 +26,13 @@ test("rejects missing or dynamic schedule and duplicate env keys", () => {
   assert.throws(() => parseScript("const schedule = '0 7 * * *';"), /literal export/);
   assert.throws(() => parseScript("export const schedule = process.env.CRON;"), /literal export/);
   assert.throws(() => parseEnv("TOKEN=one\nTOKEN=two"), /Duplicate/);
+  for (const schedule of ["99 99 * * *", "* * * * nope", "*/0 * * * *", "30-10 * * * *"]) {
+    assert.throws(() => parseScript(`export const schedule = "${schedule}";`), /Invalid cron schedule/);
+  }
+  assert.equal(parseScript('export const schedule = "0 7 * JAN,MAR MON-FRI";').schedule, "0 7 * JAN,MAR MON-FRI");
 });
 
-test("deploy invokes kubectl for Secret, ConfigMap, and NodeSchedule in order", () => {
+test("deploy makes the Secret and ConfigMap depend on the NodeSchedule", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "nodeschedule-cli-"));
   try {
     const folder = path.join(temp, "daily");
@@ -39,18 +43,25 @@ test("deploy invokes kubectl for Secret, ConfigMap, and NodeSchedule in order", 
     fs.writeFileSync(stub, `#!/usr/bin/env node
 const fs = require('node:fs');
 fs.appendFileSync(process.env.CAPTURE, JSON.stringify({args: process.argv.slice(2), resource: JSON.parse(fs.readFileSync(0, 'utf8'))}) + '\\n');
-console.log('applied');
+if (process.argv.includes('-o')) console.log(JSON.stringify({metadata: {uid: 'schedule-uid'}}));
+else console.log('applied');
 `, { mode: 0o755 });
     const capture = path.join(temp, "capture");
     const result = spawnSync(process.execPath, [path.join(__dirname, "nodeschedule.js"), "deploy", folder, "--context", "test-cluster"], {
       encoding: "utf8", env: { ...process.env, PATH: `${temp}:${process.env.PATH}`, CAPTURE: capture },
     });
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, JSON.stringify({ error: result.error?.message, signal: result.signal, stderr: result.stderr, stdout: result.stdout }));
     const calls = fs.readFileSync(capture, "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls.map((call) => call.resource.kind), ["Secret", "ConfigMap", "NodeSchedule"]);
+    assert.deepEqual(calls.map((call) => call.resource.kind), ["NodeSchedule", "Secret", "ConfigMap"]);
     assert.ok(calls.every((call) => call.args.includes("--server-side") && call.args.includes("test-cluster")));
-    assert.equal(calls[0].resource.data.TOKEN, Buffer.from("secret-value").toString("base64"));
-    assert.equal(calls[2].resource.spec.timeZone, "Etc/UTC");
+    assert.ok(calls[0].args.includes("json"));
+    assert.equal(calls[0].resource.spec.timeZone, "Etc/UTC");
+    for (const call of calls.slice(1)) {
+      assert.deepEqual(call.resource.metadata.ownerReferences, [{
+        apiVersion: "automation.lannonbr.com/v1alpha1", kind: "NodeSchedule", name: "daily", uid: "schedule-uid",
+      }]);
+    }
+    assert.equal(calls[1].resource.data.TOKEN, Buffer.from("secret-value").toString("base64"));
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

@@ -20,15 +20,37 @@ function extractStringExport(source, name, required) {
 function parseScript(script) {
   const schedule = extractStringExport(script, "schedule", true);
   const zone = extractStringExport(script, "timeZone", false);
-  // Kubernetes CronJobs accept five-field expressions and standard @daily-style descriptors.
-  const fields = schedule.trim().split(/\s+/);
-  if (!(fields.length === 5 || /^@(yearly|annually|monthly|weekly|daily|midnight|hourly)$/.test(schedule))) {
-    throw new Error(`Invalid cron schedule ${JSON.stringify(schedule)}; use five fields or a standard @ descriptor`);
+  if (!validSchedule(schedule)) {
+    throw new Error(`Invalid cron schedule ${JSON.stringify(schedule)}; use a valid five-field expression or standard @ descriptor`);
   }
   const timeZone = zone || "Etc/UTC";
   try { new Intl.DateTimeFormat("en", { timeZone }); }
   catch { throw new Error(`Invalid time zone ${JSON.stringify(timeZone)}`); }
   return { source: script, schedule, timeZone };
+}
+
+function validSchedule(schedule) {
+  const expression = schedule.trim();
+  if (/^@(yearly|annually|monthly|weekly|daily|midnight|hourly)$/.test(expression)) return true;
+  const fields = expression.split(/\s+/);
+  if (fields.length !== 5) return false;
+  const ranges = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+  const names = [null, null, null,
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"],
+    ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]];
+  return fields.every((field, index) => field.split(",").every((part) => {
+    const match = /^(\*|\?|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)(?:\/(\d+))?$/.exec(part);
+    if (!match || (match[1] === "?" && index !== 2 && index !== 4) ||
+        (match[2] !== undefined && (!Number.isSafeInteger(Number(match[2])) || Number(match[2]) < 1))) return false;
+    if (match[1] === "*" || match[1] === "?") return true;
+    const bounds = match[1].split("-").map((value) => {
+      const nameIndex = names[index]?.indexOf(value.toUpperCase()) ?? -1;
+      return nameIndex >= 0 ? nameIndex + (index === 3 ? 1 : 0) :
+        /^\d+$/.test(value) ? Number(value) : NaN;
+    });
+    return bounds.every((value) => Number.isInteger(value) && value >= ranges[index][0] && value <= ranges[index][1]) &&
+      (bounds.length === 1 || bounds[0] <= bounds[1]);
+  }));
 }
 
 function parseEnv(contents) {
@@ -71,7 +93,7 @@ function buildResources({ name, namespace, source, schedule, timeZone, env }) {
       env: Object.keys(env).sort().map((key) => ({ name: key, valueFrom: { secretKeyRef: { name: secretName, key } } })),
     },
   };
-  return [secret, configMap, nodeSchedule];
+  return [nodeSchedule, secret, configMap];
 }
 
 module.exports = { parseScript, parseEnv, buildResources, validName };

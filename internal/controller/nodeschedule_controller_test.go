@@ -2,20 +2,32 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	automationv1alpha1 "github.com/lannonbr/node-schedule/api/v1alpha1"
 )
+
+type failedConfigMapReader struct{ client.Client }
+
+func (c failedConfigMapReader) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	if _, ok := object.(*corev1.ConfigMap); ok {
+		return errors.New("temporary ConfigMap read failure")
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
 
 func TestDesiredCronJobAppliesSafeDefaults(t *testing.T) {
 	reconciler := &NodeScheduleReconciler{NodeImage: "node@example-digest"}
@@ -65,6 +77,41 @@ func TestDesiredCronJobCanBeForceSuspended(t *testing.T) {
 	cronJob := reconciler.desiredCronJob(schedule, true)
 	if cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend {
 		t.Fatal("expected force-suspended CronJob")
+	}
+}
+
+func TestResourceDefaultsRespectExplicitValues(t *testing.T) {
+	resources := defaultResources(corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("32Mi")},
+	})
+	if resources.Limits.Cpu().Cmp(*resources.Requests.Cpu()) < 0 {
+		t.Fatal("default CPU limit is below the explicit request")
+	}
+	if resources.Requests.Memory().Cmp(*resources.Limits.Memory()) > 0 {
+		t.Fatal("default memory request exceeds the explicit limit")
+	}
+}
+
+func TestValidateRejectsRequestAboveLimit(t *testing.T) {
+	reconciler := &NodeScheduleReconciler{}
+	schedule := &automationv1alpha1.NodeSchedule{Spec: automationv1alpha1.NodeScheduleSpec{
+		Schedule:           "@daily",
+		ScriptConfigMapRef: corev1.LocalObjectReference{Name: "script"},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+		},
+	}}
+	if err := reconciler.validate(context.Background(), schedule); err == nil || err.reason != "InvalidResources" {
+		t.Fatalf("expected InvalidResources, got %v", err)
+	}
+}
+
+func TestRetryingJobIsNotReportedFailed(t *testing.T) {
+	phase, _ := jobPhase(&batchv1.Job{Status: batchv1.JobStatus{Failed: 1, Active: 1}})
+	if phase != "Running" {
+		t.Fatalf("expected Running while retrying, got %q", phase)
 	}
 }
 
@@ -138,5 +185,16 @@ func TestReconcileSuspendsUntilScriptConfigMapExists(t *testing.T) {
 	condition = meta.FindStatusCondition(current.Status.Conditions, readyCondition)
 	if condition == nil || condition.Status != metav1.ConditionTrue {
 		t.Fatalf("unexpected repaired Ready condition: %#v", condition)
+	}
+
+	reconciler.Client = failedConfigMapReader{testClient}
+	if _, err := reconciler.Reconcile(context.Background(), request); err == nil {
+		t.Fatal("expected a transient read error to be retried")
+	}
+	if err := testClient.Get(context.Background(), request.NamespacedName, &cronJob); err != nil {
+		t.Fatal(err)
+	}
+	if cronJob.Spec.Suspend == nil || *cronJob.Spec.Suspend {
+		t.Fatal("CronJob should remain active after a transient read error")
 	}
 }

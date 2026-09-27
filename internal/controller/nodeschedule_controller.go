@@ -73,6 +73,9 @@ func (r *NodeScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	validationErr := r.validate(ctx, &schedule)
 	if validationErr != nil {
+		if validationErr.retry {
+			return ctrl.Result{}, validationErr
+		}
 		if err := r.reconcileInvalid(ctx, &schedule, validationErr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -107,6 +110,7 @@ type configError struct {
 	reason       string
 	message      string
 	canReconcile bool
+	retry        bool
 }
 
 func (e *configError) Error() string { return e.message }
@@ -146,6 +150,11 @@ func (r *NodeScheduleReconciler) validate(ctx context.Context, schedule *automat
 			return &configError{reason: "InvalidEnvironment", message: fmt.Sprintf("environment variable %q has an incomplete secretKeyRef", env.Name)}
 		}
 	}
+	for name, request := range schedule.Spec.Resources.Requests {
+		if limit, found := schedule.Spec.Resources.Limits[name]; found && request.Cmp(limit) > 0 {
+			return &configError{reason: "InvalidResources", message: fmt.Sprintf("resource %q request exceeds its limit", name)}
+		}
+	}
 
 	var source corev1.ConfigMap
 	key := types.NamespacedName{Namespace: schedule.Namespace, Name: schedule.Spec.ScriptConfigMapRef.Name}
@@ -153,7 +162,7 @@ func (r *NodeScheduleReconciler) validate(ctx context.Context, schedule *automat
 		if apierrors.IsNotFound(err) {
 			return &configError{reason: "ConfigMapNotFound", message: fmt.Sprintf("script ConfigMap %q was not found", key.Name), canReconcile: true}
 		}
-		return &configError{reason: "DependencyCheckFailed", message: err.Error(), canReconcile: true}
+		return &configError{reason: "DependencyCheckFailed", message: err.Error(), retry: true}
 	}
 	if strings.TrimSpace(source.Data["script.js"]) == "" {
 		return &configError{reason: "ScriptNotFound", message: fmt.Sprintf("ConfigMap %q must contain a non-empty script.js key", key.Name), canReconcile: true}
@@ -170,7 +179,7 @@ func (r *NodeScheduleReconciler) validate(ctx context.Context, schedule *automat
 			if apierrors.IsNotFound(err) {
 				return &configError{reason: "SecretNotFound", message: fmt.Sprintf("Secret %q for environment variable %q was not found", ref.Name, env.Name), canReconcile: true}
 			}
-			return &configError{reason: "DependencyCheckFailed", message: err.Error(), canReconcile: true}
+			return &configError{reason: "DependencyCheckFailed", message: err.Error(), retry: true}
 		}
 		if _, found := secret.Data[ref.Key]; !found {
 			return &configError{reason: "SecretKeyNotFound", message: fmt.Sprintf("Secret %q does not contain key %q", ref.Name, ref.Key), canReconcile: true}
@@ -244,13 +253,7 @@ func (r *NodeScheduleReconciler) desiredCronJob(schedule *automationv1alpha1.Nod
 	backoffLimit := valueOr(execution.BackoffLimit, defaultBackoffLimit)
 	successHistory := valueOr(execution.SuccessfulJobsHistoryLimit, defaultSuccessHistory)
 	failureHistory := valueOr(execution.FailedJobsHistoryLimit, defaultFailureHistory)
-	resources := schedule.Spec.Resources.DeepCopy()
-	if len(resources.Requests) == 0 {
-		resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("25m"), corev1.ResourceMemory: resource.MustParse("64Mi")}
-	}
-	if len(resources.Limits) == 0 {
-		resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("128Mi")}
-	}
+	resources := defaultResources(schedule.Spec.Resources)
 	falseValue := false
 	trueValue := true
 	suspend := schedule.Spec.Suspend || forceSuspend
@@ -293,6 +296,45 @@ func (r *NodeScheduleReconciler) desiredCronJob(schedule *automationv1alpha1.Nod
 			},
 		},
 	}
+}
+
+func defaultResources(configured corev1.ResourceRequirements) *corev1.ResourceRequirements {
+	resources := configured.DeepCopy()
+	if resources.Requests == nil {
+		resources.Requests = corev1.ResourceList{}
+	}
+	if resources.Limits == nil {
+		resources.Limits = corev1.ResourceList{}
+	}
+	defaults := []struct {
+		name    corev1.ResourceName
+		request string
+		limit   string
+	}{
+		{corev1.ResourceCPU, "25m", "250m"},
+		{corev1.ResourceMemory, "64Mi", "128Mi"},
+	}
+	for _, value := range defaults {
+		request, hasRequest := resources.Requests[value.name]
+		limit, hasLimit := resources.Limits[value.name]
+		defaultRequest := resource.MustParse(value.request)
+		defaultLimit := resource.MustParse(value.limit)
+		if !hasRequest {
+			if hasLimit && limit.Cmp(defaultRequest) < 0 {
+				resources.Requests[value.name] = limit.DeepCopy()
+			} else {
+				resources.Requests[value.name] = defaultRequest
+			}
+		}
+		if !hasLimit {
+			if hasRequest && request.Cmp(defaultLimit) > 0 {
+				resources.Limits[value.name] = request.DeepCopy()
+			} else {
+				resources.Limits[value.name] = defaultLimit
+			}
+		}
+	}
+	return resources
 }
 
 func (r *NodeScheduleReconciler) refreshRunStatus(ctx context.Context, schedule *automationv1alpha1.NodeSchedule) error {
@@ -367,9 +409,6 @@ func jobPhase(job *batchv1.Job) (string, string) {
 	}
 	if job.Status.Succeeded > 0 {
 		return "Succeeded", "Completed"
-	}
-	if job.Status.Failed > 0 {
-		return "Failed", "Failed"
 	}
 	if job.Status.Active > 0 {
 		return "Running", "Active"
