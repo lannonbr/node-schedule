@@ -2,6 +2,10 @@
 
 NodeSchedule runs trusted, dependency-free Node.js scripts on a Kubernetes schedule. Its CLI deploys a script folder as a `NodeSchedule` resource; a single-namespace controller turns each resource into a CronJob.
 
+## AI Notice
+
+Note that the majority of the code was generated with Codex, so pray caution before using this on a production cluster.
+
 ## How it runs
 
 - The controller watches one namespace (`automation` by default) and creates one same-name CronJob per NodeSchedule.
