@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nodeschedule-controller
-  namespace: automation
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     app.kubernetes.io/name: nodeschedule
 spec:
@@ -23,7 +23,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: ghcr.io/lannonbr/node-schedule:latest
+          image: {{ .Values.controllerImage | quote }}
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect
@@ -33,7 +33,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: NODE_IMAGE
-              value: node:24-alpine@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81
+              value: {{ .Values.nodeImage | quote }}
           ports:
             - name: metrics
               containerPort: 8080

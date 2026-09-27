@@ -1,0 +1,5 @@
+apiVersion: v2
+name: node-schedule
+description: Single-namespace NodeSchedule controller
+type: application
+version: 0.1.0
