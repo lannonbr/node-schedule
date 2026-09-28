@@ -17,7 +17,7 @@ The controller intentionally does not expose arbitrary images, commands, volumes
 
 ## Local checks
 
-Go 1.23 or newer is required.
+Go 1.26 or newer is required.
 
 ```sh
 make fmt
